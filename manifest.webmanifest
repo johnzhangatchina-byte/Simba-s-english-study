@@ -1,0 +1,10 @@
+{
+  "name": "小队电台英语",
+  "short_name": "小队电台",
+  "lang": "zh-Hans",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#eef4ef",
+  "theme_color": "#1e6b48",
+  "description": "给孩子的英语听说课：小队、地图与沟通用语。不是射击游戏。"
+}
