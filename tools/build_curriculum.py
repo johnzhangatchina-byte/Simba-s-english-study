@@ -756,8 +756,8 @@ def pick_image(*parts):
     key = text.lower()
     for pattern, name in IMAGE_RULES:
         if re.search(pattern, key, flags=re.I):
-            return f"images/{name}.svg"
-    return f"images/{DEFAULT_IMAGE}.svg"
+            return f"images/{name}.webp"
+    return f"images/{DEFAULT_IMAGE}.webp"
 
 
 def slug(text, i):
@@ -914,7 +914,7 @@ assert len(lessons) == 52 * 7
 data = {
     "product": "小队电台英语",
     "version": 2,
-    "cacheVersion": "simba-squad-v2",
+    "cacheVersion": "simba-squad-v3",
     "learnerDefaultName": "Simba",
     "noteZh": "课文只用小队、地图、方向和沟通用语，不打开《三角洲行动》游戏。该游戏在中国区 App Store 当前为 18+。",
     "phases": [
@@ -924,16 +924,16 @@ data = {
         {"id": 4, "weeks": [40, 52], "titleZh": "交流与解说"},
     ],
     "places": [
-        {"id": "start", "zh": "起点", "x": 1, "y": 1, "image": "images/start.svg"},
-        {"id": "left", "zh": "左边", "x": 0, "y": 1, "image": "images/left.svg"},
-        {"id": "right", "zh": "右边", "x": 2, "y": 1, "image": "images/right.svg"},
-        {"id": "yard", "zh": "院子", "x": 1, "y": 0, "image": "images/yard.svg"},
-        {"id": "door", "zh": "门", "x": 0, "y": 0, "image": "images/door.svg"},
-        {"id": "window", "zh": "窗户", "x": 2, "y": 0, "image": "images/window.svg"},
-        {"id": "bag", "zh": "背包", "x": 0, "y": 2, "image": "images/bag.svg"},
-        {"id": "table", "zh": "桌子", "x": 1, "y": 2, "image": "images/table.svg"},
-        {"id": "radio", "zh": "对讲机", "x": 2, "y": 2, "image": "images/radio.svg"},
-        {"id": "team", "zh": "小队", "x": 2, "y": 1, "image": "images/team.svg"},
+        {"id": "start", "zh": "起点", "x": 1, "y": 1, "image": "images/start.webp"},
+        {"id": "left", "zh": "左边", "x": 0, "y": 1, "image": "images/left.webp"},
+        {"id": "right", "zh": "右边", "x": 2, "y": 1, "image": "images/right.webp"},
+        {"id": "yard", "zh": "院子", "x": 1, "y": 0, "image": "images/yard.webp"},
+        {"id": "door", "zh": "门", "x": 0, "y": 0, "image": "images/door.webp"},
+        {"id": "window", "zh": "窗户", "x": 2, "y": 0, "image": "images/window.webp"},
+        {"id": "bag", "zh": "背包", "x": 0, "y": 2, "image": "images/bag.webp"},
+        {"id": "table", "zh": "桌子", "x": 1, "y": 2, "image": "images/table.webp"},
+        {"id": "radio", "zh": "对讲机", "x": 2, "y": 2, "image": "images/radio.webp"},
+        {"id": "team", "zh": "小队", "x": 2, "y": 1, "image": "images/team.webp"},
     ],
     "lessons": lessons,
 }

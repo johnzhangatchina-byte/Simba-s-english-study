@@ -60,7 +60,7 @@
       const pl = data.places.find(function (x) { return x.id === id; });
       if (pl && pl.image) return pl.image;
     }
-    return "images/" + id + ".svg";
+    return "images/" + id + ".webp";
   }
 
   function unlockedTips() {
