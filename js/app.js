@@ -40,12 +40,46 @@
     practice: false,
     banner: "",
     recOn: false,
+    tipLesson: null,
   };
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
     });
+  }
+
+
+  function imgBox(src, cls, alt) {
+    if (!src) return "";
+    return '<div class="' + cls + '"><img src="' + esc(src) + '" alt="' + esc(alt || "") + '" onerror="this.parentNode.style.display=\'none\'"></div>';
+  }
+
+  function placeImage(id) {
+    if (data && data.places) {
+      const pl = data.places.find(function (x) { return x.id === id; });
+      if (pl && pl.image) return pl.image;
+    }
+    return "images/" + id + ".svg";
+  }
+
+  function unlockedTips() {
+    const p = loadProgress();
+    return data.lessons.filter(function (l) { return p.completed[l.id] && l.tip; });
+  }
+
+  function tipCard(tip, opts) {
+    opts = opts || {};
+    let html = "";
+    if (tip.titleZh) html += '<p class="tip-title">' + esc(tip.titleZh) + "</p>";
+    html += imgBox(tip.image, "tip-art", tip.titleZh || tip.en || "游戏小贴士");
+    html += '<div class="bilingual">';
+    html += '<p class="en">' + esc(tip.en) + "</p>";
+    html += '<p class="zh">' + esc(tip.zh) + "</p></div>";
+    html += '<div class="row">';
+    html += '<button class="secondary" data-act="play-tip-en">听英语</button>';
+    html += '<button class="secondary" data-act="play-tip-zh">听中文</button></div>';
+    return html;
   }
 
   function loadProgress() {
@@ -227,11 +261,12 @@
         '<button class="icon-btn" data-act="parent">家长角</button></div>';
       html += '<div class="hero">';
       if (!next) {
-        html += "<h1>一年的课都完成了</h1><p class=\"sub\">Simba 可以随时回来复习任何一课。</p>";
+        html += "<h1>一年的课都完成了</h1><p class=\"sub\">Simba 可以随时回来复习任何一课，也可以再看游戏小贴士。</p>";
       } else {
+        html += imgBox(next.image, "hero-art", next.titleZh);
         html += "<h1>" + esc(next.titleZh) + "</h1>";
         html += '<p class="sub">第 ' + next.week + " 周 · " + esc(next.dayZh) + " · 大约 10 到 15 分钟</p>";
-        html += '<p class="meta">先听，再说，再做一个小任务。不打开游戏。</p>';
+        html += '<p class="meta">先听五句话，再说，再做一个小任务。完成后可解锁今日游戏小贴士。不打开游戏。</p>';
         html += '<button class="primary" data-act="start">开始今天的任务</button>';
       }
       html += '<div class="progress-bar"><span style="width:' + pct + '%"></span></div>';
@@ -245,6 +280,11 @@
         html += '<div class="chip" title="' + esc(s) + '">' + (STICKER_ICON[s] || "⭐") + "</div>";
       });
       html += "</div></div>";
+      const tipsN = unlockedTips().length;
+      html += '<div class="card" style="margin-top:16px"><h2>游戏小贴士</h2>';
+      html += '<p class="sub">完成当天的学习任务后，会解锁一条游戏或设计小贴士。</p>';
+      html += '<p class="meta">已解锁 ' + tipsN + " 条</p>";
+      html += '<button class="secondary" data-act="tips">打开贴士菜单</button></div>';
       html += '<button class="ghost" data-act="notice">关于这门课</button>';
     } else if (state.view === "notice") {
       html += '<div class="top"><button class="icon-btn" data-act="home">返回</button><div class="brand">说明</div></div>';
@@ -254,7 +294,9 @@
       html += '<p class="note">本页没有账号、没有服务器。进度保存在这台设备的浏览器里。</p></div>';
     } else if (state.view === "intro" && lesson) {
       html += '<div class="top"><button class="icon-btn" data-act="home">返回</button><div class="brand">第 ' + lesson.week + " 周</div></div>";
-      html += '<div class="card"><h1>' + esc(lesson.titleZh) + "</h1>";
+      html += '<div class="card">';
+      html += imgBox(lesson.image, "intro-art", lesson.titleZh);
+      html += "<h1>" + esc(lesson.titleZh) + "</h1>";
       html += '<p class="sub">' + esc(lesson.introZh) + "</p>";
       html += '<button class="primary" data-act="go-listen">开始听</button></div>';
     } else if ((state.view === "listen" || state.view === "speak") && lesson) {
@@ -267,6 +309,7 @@
         html += '<span class="dot' + (i === state.phraseIndex ? " on" : (i < state.phraseIndex ? " done" : "")) + '"></span>';
       }
       html += "</div><div class=\"card\">";
+      html += imgBox(ph.image, "phrase-art", ph.en);
       html += '<p class="phrase">' + esc(ph.en) + "</p>";
       html += '<p class="zh">' + (state.revealZh ? esc(ph.zh) : "点「中文」看意思") + "</p>";
       html += '<p class="cue">' + esc(ph.cue || "") + "</p>";
@@ -298,6 +341,7 @@
         if (!step) {
           html += '<p class="sub">地图任务完成了。</p><button class="primary" data-act="finish">领取贴纸</button>';
         } else {
+          html += imgBox(step.image, "phrase-art", step.en);
           html += '<p class="phrase">' + esc(step.en) + "</p>";
           html += '<p class="zh">' + (state.revealZh ? esc(step.zh) : "") + "</p>";
           html += '<button class="horn" data-act="play-step">再听指令</button>';
@@ -309,7 +353,7 @@
           PLACE_ORDER.flat().forEach(function (id) {
             const on = state.taskFeedback === "ok" && step.place === id ? " on" : "";
             const bad = state.taskFeedback === "bad" && state.badPlace === id ? " bad" : "";
-            html += '<button class="cell' + on + bad + '" data-place="' + id + '">' + esc(PLACE_ZH[id]) + "</button>";
+            html += '<button class="cell' + on + bad + '" data-place="' + id + '"><img src="' + esc(placeImage(id)) + '" alt="">' + esc(PLACE_ZH[id]) + "</button>";
           });
           html += "</div>";
           html += '<button class="ghost" data-act="zh">看中文</button>';
@@ -333,10 +377,45 @@
       html += "</div>";
     } else if (state.view === "sticker" && lesson) {
       const icon = STICKER_ICON[lesson.sticker] || "⭐";
-      html += '<div class="card" style="margin-top:40px;text-align:center">';
-      html += '<div class="sticker-art">' + icon + "</div>";
-      html += "<h1>任务完成</h1><p class=\"sub\">你得到一枚新贴纸。明天见，小队队员。</p>";
-      html += '<button class="primary" data-act="home">回到首页</button></div>';
+      const unlocked = !!(loadProgress().completed[lesson.id]);
+      html += '<div class="top"><button class="icon-btn" data-act="home">返回</button><div class="brand">任务完成</div></div>';
+      html += '<div class="card" style="text-align:center">';
+      html += '<div class="sticker-art small">' + icon + "</div>";
+      html += "<h1>任务完成</h1>";
+      if (unlocked && lesson.tip) {
+        html += '<p class="reward-flag">今日游戏小贴士已解锁</p>';
+        html += tipCard(lesson.tip);
+        html += '<button class="primary" data-act="tips">打开贴士菜单</button>';
+        html += '<button class="secondary" data-act="home">回到首页</button>';
+      } else {
+        html += '<p class="sub">这次是练习。完成正式任务后，才能解锁今日游戏小贴士。</p>';
+        html += '<button class="primary" data-act="home">回到首页</button>';
+      }
+      html += "</div>";
+    } else if (state.view === "tips") {
+      const list = unlockedTips();
+      html += '<div class="top"><button class="icon-btn" data-act="home">返回</button><div class="brand">游戏小贴士</div></div>';
+      html += '<div class="card"><h2>已解锁的贴士</h2>';
+      html += '<p class="sub">完成当天学习任务后才会出现在这里。还没做的课，贴士先保密。</p></div>';
+      if (!list.length) {
+        html += '<p class="empty-tips">还没有解锁的贴士。先完成今天的任务吧。</p>';
+      } else {
+        html += '<div class="list">';
+        list.slice().reverse().forEach(function (l) {
+          html += '<button class="item tip-item" data-tip="' + esc(l.id) + '">';
+          html += '<img src="' + esc(l.tip.image) + '" alt="">';
+          html += '<span class="meta-wrap"><strong>' + esc(l.tip.titleZh) + "</strong>";
+          html += "<small>第 " + l.week + " 周 · " + esc(l.dayZh) + " · " + esc(l.titleZh) + "</small></span></button>";
+        });
+        html += "</div>";
+      }
+    } else if (state.view === "tip-detail" && state.tipLesson) {
+      const tl = state.tipLesson;
+      html += '<div class="top"><button class="icon-btn" data-act="tips">返回</button><div class="brand">游戏小贴士</div></div>';
+      html += '<div class="card" style="text-align:center">';
+      html += '<p class="meta">第 ' + tl.week + " 周 · " + esc(tl.dayZh) + "</p>";
+      html += tipCard(tl.tip);
+      html += "</div>";
     } else if (state.view === "parent") {
       html += '<div class="top"><button class="icon-btn" data-act="home">返回</button><div class="brand">家长角</div></div>';
       if (!state.parentAuthed) {
@@ -452,6 +531,17 @@
         if (les) openLesson(les, true);
       });
     });
+    $app.querySelectorAll("[data-tip]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const id = btn.getAttribute("data-tip");
+        const les = unlockedTips().find(function (l) { return l.id === id; });
+        if (les) {
+          state.tipLesson = les;
+          state.view = "tip-detail";
+          render();
+        }
+      });
+    });
   }
 
   function openLesson(lesson, practice) {
@@ -477,12 +567,24 @@
     }
     state.view = "sticker";
     render();
-    sayZh("任务完成。你得到一枚新贴纸。");
+    if (!state.practice) sayZh("任务完成。今天的游戏小贴士已解锁。");
+    else sayZh("练习完成。");
   }
 
   async function onAct(act) {
     const lesson = state.lesson;
-    if (act === "home") { state.view = "home"; state.parentAuthed = false; setBanner(); render(); return; }
+    if (act === "home") { state.view = "home"; state.parentAuthed = false; state.tipLesson = null; setBanner(); render(); return; }
+    if (act === "tips") { state.view = "tips"; state.tipLesson = null; render(); return; }
+    if (act === "play-tip-en") {
+      const tip = (state.view === "tip-detail" && state.tipLesson ? state.tipLesson.tip : (lesson && lesson.tip));
+      if (tip) await speak(tip.en, "en-US", 0.92);
+      return;
+    }
+    if (act === "play-tip-zh") {
+      const tip = (state.view === "tip-detail" && state.tipLesson ? state.tipLesson.tip : (lesson && lesson.tip));
+      if (tip) await sayZh(tip.zh);
+      return;
+    }
     if (act === "notice") { state.view = "notice"; render(); return; }
     if (act === "parent") { state.view = "parent"; state.parentAuthed = false; render(); return; }
     if (act === "parent-back") { state.view = "parent"; state.parentAuthed = true; render(); return; }
