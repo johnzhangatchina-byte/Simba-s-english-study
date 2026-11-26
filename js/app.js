@@ -40,6 +40,8 @@
     practice: false,
     banner: "",
     recOn: false,
+    recMsg: "",
+    recMsgKind: "",
     tipLesson: null,
   };
 
@@ -115,6 +117,22 @@
   function isFile() {
     return location.protocol === "file:";
   }
+  function ua() {
+    return navigator.userAgent || "";
+  }
+  function isWeChat() {
+    return /MicroMessenger/i.test(ua());
+  }
+  function isInAppBrowser() {
+    return /MicroMessenger|QQ\/|Weibo|DingTalk|AlipayClient|UCBrowser/i.test(ua());
+  }
+  function isAppleWebKit() {
+    const s = ua();
+    if (/iPad|iPhone|iPod/.test(s)) return true;
+    if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
+    if (/Safari/i.test(s) && !/Chrome|Chromium|Edg|Firefox|Android/i.test(s)) return true;
+    return false;
+  }
 
   async function playFile(src) {
     return new Promise(function (resolve, reject) {
@@ -164,51 +182,434 @@
   let mediaStream = null;
   let recorder = null;
   let chunks = [];
+  let recMime = "";
+  let recStartAt = 0;
+  let recStarting = false;
+  let recToken = 0;
+  let recTimer = null;
+  let recAnalyser = null;
+  let recAudioCtx = null;
+  let recMeterStream = null;
+  let recMeterRaf = 0;
+
+  function pickMimeType() {
+    if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+      return "";
+    }
+    const appleFirst = [
+      "audio/mp4",
+      "audio/mp4;codecs=mp4a.40.2",
+      "audio/aac",
+      "audio/mpeg"
+    ];
+    const othersFirst = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/ogg"
+    ];
+    const list = isAppleWebKit()
+      ? appleFirst.concat(othersFirst)
+      : othersFirst.concat(appleFirst);
+    for (let i = 0; i < list.length; i++) {
+      try {
+        if (MediaRecorder.isTypeSupported(list[i])) return list[i];
+      } catch (e) { /* try next */ }
+    }
+    return "";
+  }
+
+  function normalizeBlobType(type, fallbackChunk) {
+    const raw = type || (fallbackChunk && fallbackChunk.type) || "";
+    if (/mp4/i.test(raw) || /aac/i.test(raw) || /mpeg/i.test(raw)) return "audio/mp4";
+    if (/webm/i.test(raw)) return "audio/webm";
+    if (/ogg/i.test(raw)) return "audio/ogg";
+    if (raw) return raw.split(";")[0];
+    return isAppleWebKit() ? "audio/mp4" : "audio/webm";
+  }
+
+  function recSupportError() {
+    if (isFile() || !window.isSecureContext) return "insecure";
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return "no-mic-api";
+    if (typeof MediaRecorder === "undefined") return "no-recorder";
+    return "";
+  }
+
+  function recErrorMessage(err) {
+    const name = (err && err.name) || "";
+    const msg = (err && err.message) || String(err || "");
+    const inApp = isInAppBrowser();
+    const inAppHint = inApp
+      ? (isWeChat()
+        ? "如果是在微信里打开的，请点右上角「···」，选择「在 Safari 中打开」或「在浏览器中打开」，再试一次。"
+        : "请用手机自带的 Safari（苹果）或 Chrome（安卓）打开本课，不要停在微信或其他 App 的内置窗口里。")
+      : "";
+    if (msg === "insecure" || name === "SecurityError" || (msg === "no-mic-api" && (isFile() || insecure()))) {
+      return "这一页不是安全的打开方式，浏览器不允许使用麦克风。请用手机浏览器打开本课的 https 网址。电脑上请运行文件夹里的启动脚本，再用浏览器打开 http://localhost:8080。不要直接打开网页文件。";
+    }
+    if (msg === "no-mic-api" || msg === "no-recorder" || name === "NotSupportedError") {
+      return "这台浏览器还不能录音。" + (inApp
+        ? inAppHint
+        : "苹果手机和平板请用 Safari，安卓请用 Chrome，打开本课再试。");
+    }
+    if (name === "NotAllowedError" || name === "PermissionDeniedError" || /permission/i.test(msg)) {
+      return "还没有允许本页使用麦克风，所以没能录音。请家长帮忙：如果刚刚弹出过「允许麦克风」，请点允许。如果以前点过不允许，请点地址栏左边的锁图标或「AA」按钮，把本网站的麦克风改成「允许」，然后刷新页面。苹果手机也可以到「设置 → Safari → 麦克风」里打开。 " + inAppHint;
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      return "没有找到麦克风。请检查手机或平板的麦克风是否可用，或者换一台设备再试。";
+    }
+    if (name === "NotReadableError" || name === "TrackStartError") {
+      return "麦克风好像被别的应用占用了。请关掉正在录音的其他应用，再回到这一页试试。";
+    }
+    if (name === "OverconstrainedError") {
+      return "这台设备的麦克风暂时没法启动。请再试一次，或换用 Safari（苹果）或 Chrome（安卓）。";
+    }
+    if (name === "AbortError") {
+      return "录音被中断了。请再点一次「开始录音」。";
+    }
+    return "录音没能开始。" + (inAppHint || "请再试一次。如果还不行，请用 Safari（苹果）或 Chrome（安卓）打开本课。");
+  }
+
+  async function getMicStream() {
+    const tries = [
+      { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } },
+      { audio: true }
+    ];
+    let lastErr = null;
+    for (let i = 0; i < tries.length; i++) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(tries[i]);
+      } catch (e) {
+        lastErr = e;
+        const name = (e && e.name) || "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") throw e;
+      }
+    }
+    throw lastErr || new Error("no-mic-api");
+  }
+
+  function releaseStream() {
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(function (t) { t.stop(); });
+      mediaStream = null;
+    }
+  }
 
   async function startRec() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error("no-mic-api");
-    }
-    if (!window.isSecureContext) throw new Error("insecure");
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const support = recSupportError();
+    if (support) throw new Error(support);
+    releaseStream();
+    mediaStream = await getMicStream();
     chunks = [];
-    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-      ? "audio/webm;codecs=opus"
-      : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
-    recorder = mime ? new MediaRecorder(mediaStream, { mimeType: mime }) : new MediaRecorder(mediaStream);
-    recorder.ondataavailable = function (ev) { if (ev.data && ev.data.size) chunks.push(ev.data); };
-    recorder.start();
+    recMime = pickMimeType();
+    try {
+      recorder = recMime
+        ? new MediaRecorder(mediaStream, { mimeType: recMime })
+        : new MediaRecorder(mediaStream);
+    } catch (e) {
+      recorder = new MediaRecorder(mediaStream);
+    }
+    recMime = recorder.mimeType || recMime;
+    recorder.ondataavailable = function (ev) {
+      if (ev.data && ev.data.size) chunks.push(ev.data);
+    };
+    await new Promise(function (resolve, reject) {
+      let settled = false;
+      const ok = function () {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const fail = function (err) {
+        if (settled) return;
+        settled = true;
+        reject(err || new Error("recorder-start"));
+      };
+      recorder.onerror = function (ev) {
+        fail((ev && ev.error) || new Error("recorder-error"));
+      };
+      recorder.onstart = ok;
+      try {
+        recorder.start(200);
+      } catch (e) {
+        try { recorder.start(); } catch (e2) { fail(e2); return; }
+      }
+      setTimeout(function () {
+        if (recorder && recorder.state === "recording") ok();
+      }, 250);
+      setTimeout(function () {
+        if (settled) return;
+        if (recorder && recorder.state === "recording") ok();
+        else fail(new Error("recorder-start"));
+      }, 2000);
+    });
+    recStartAt = Date.now();
   }
+
   function stopRec() {
     return new Promise(function (resolve) {
-      if (!recorder) { resolve(null); return; }
-      recorder.onstop = function () {
-        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-        if (mediaStream) {
-          mediaStream.getTracks().forEach(function (t) { t.stop(); });
-          mediaStream = null;
-        }
+      const rec = recorder;
+      if (!rec) {
+        releaseStream();
+        resolve(null);
+        return;
+      }
+      let settled = false;
+      const finish = function () {
+        if (settled) return;
+        settled = true;
+        const type = normalizeBlobType(rec.mimeType || recMime, chunks[0]);
+        const blob = chunks.length ? new Blob(chunks, { type: type }) : null;
+        releaseStream();
         recorder = null;
-        resolve(blob);
+        resolve(blob && blob.size ? blob : null);
       };
-      if (recorder.state !== "inactive") recorder.stop();
-      else resolve(null);
+      rec.onstop = finish;
+      rec.onerror = function () { finish(); };
+      try {
+        if (rec.state === "recording" || rec.state === "paused") {
+          try {
+            if (typeof rec.requestData === "function") rec.requestData();
+          } catch (e) { /* some browsers throw */ }
+          rec.stop();
+        } else {
+          finish();
+        }
+      } catch (e) {
+        finish();
+      }
+      setTimeout(finish, 1500);
     });
   }
+
+  function stopRecTimer() {
+    if (recTimer) {
+      clearInterval(recTimer);
+      recTimer = null;
+    }
+  }
+
+  function startRecTimer() {
+    stopRecTimer();
+    recTimer = setInterval(function () {
+      const el = $app.querySelector(".mic");
+      if (!el || !state.recOn) return;
+      const sec = Math.max(1, Math.round((Date.now() - recStartAt) / 1000));
+      el.textContent = "正在录音 " + sec + " 秒，再点一下结束";
+    }, 250);
+  }
+
+  function stopMeter() {
+    if (recMeterRaf) {
+      cancelAnimationFrame(recMeterRaf);
+      recMeterRaf = 0;
+    }
+    recAnalyser = null;
+    if (recMeterStream) {
+      recMeterStream.getTracks().forEach(function (t) { t.stop(); });
+      recMeterStream = null;
+    }
+    if (recAudioCtx) {
+      try { recAudioCtx.close(); } catch (e) {}
+      recAudioCtx = null;
+    }
+  }
+
+  function startMeter(stream) {
+    stopMeter();
+    if (!stream) return;
+    try {
+      recMeterStream = stream.clone();
+    } catch (e) {
+      return;
+    }
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      recAudioCtx = new Ctx();
+      if (recAudioCtx.state === "suspended") {
+        recAudioCtx.resume().catch(function () {});
+      }
+      const src = recAudioCtx.createMediaStreamSource(recMeterStream);
+      recAnalyser = recAudioCtx.createAnalyser();
+      recAnalyser.fftSize = 256;
+      src.connect(recAnalyser);
+      const data = new Uint8Array(recAnalyser.fftSize);
+      const tick = function () {
+        if (!state.recOn || !recAnalyser) return;
+        recAnalyser.getByteTimeDomainData(data);
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = Math.abs(data[i] - 128);
+          if (v > peak) peak = v;
+        }
+        const el = $app.querySelector(".meter-fill");
+        if (el) el.style.width = Math.min(100, Math.round((peak / 128) * 160)) + "%";
+        recMeterRaf = requestAnimationFrame(tick);
+      };
+      recMeterRaf = requestAnimationFrame(tick);
+    } catch (e) { /* meter is optional */ }
+  }
+
+  function cancelRec() {
+    recToken += 1;
+    recStarting = false;
+    state.recOn = false;
+    stopRecTimer();
+    stopMeter();
+    stopRec();
+  }
+
   function playBlob(blob) {
     return new Promise(function (resolve) {
+      if (!blob) { resolve(); return; }
       const url = URL.createObjectURL(blob);
-      const a = new Audio(url);
-      a.onended = function () { URL.revokeObjectURL(url); resolve(); };
-      a.onerror = function () { URL.revokeObjectURL(url); resolve(); };
-      a.play().catch(function () { URL.revokeObjectURL(url); resolve(); });
+      const a = document.createElement("audio");
+      a.preload = "auto";
+      a.playsInline = true;
+      a.setAttribute("playsinline", "playsinline");
+      a.src = url;
+      const done = function () {
+        URL.revokeObjectURL(url);
+        if (a.parentNode) a.parentNode.removeChild(a);
+        resolve();
+      };
+      a.onended = done;
+      a.onerror = done;
+      document.body.appendChild(a);
+      const p = a.play();
+      if (p && typeof p.catch === "function") p.catch(done);
     });
+  }
+
+  function primeAudio(blob) {
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("audio");
+    a.preload = "auto";
+    a.playsInline = true;
+    a.setAttribute("playsinline", "playsinline");
+    a.src = url;
+    document.body.appendChild(a);
+    const release = function () {
+      URL.revokeObjectURL(url);
+      if (a.parentNode) a.parentNode.removeChild(a);
+    };
+    return { audio: a, url: url, release: release };
+  }
+
+  async function playCompare(phrase, blob) {
+    const primed = primeAudio(blob);
+    if (primed) {
+      try {
+        primed.audio.muted = true;
+        const p = primed.audio.play();
+        if (p && typeof p.then === "function") await p;
+        primed.audio.pause();
+        primed.audio.currentTime = 0;
+        primed.audio.muted = false;
+      } catch (e) {
+        primed.audio.muted = false;
+      }
+    }
+    await playModel(phrase);
+    await new Promise(function (r) { setTimeout(r, 280); });
+    if (!primed) return;
+    await new Promise(function (resolve) {
+      primed.audio.onended = function () { primed.release(); resolve(); };
+      primed.audio.onerror = function () { primed.release(); resolve(); };
+      const p = primed.audio.play();
+      if (p && typeof p.catch === "function") {
+        p.catch(function () { primed.release(); resolve(); });
+      }
+    });
+  }
+
+  async function toggleRec() {
+    if (state.recOn) {
+      recStarting = true;
+      stopRecTimer();
+      stopMeter();
+      const elapsed = Date.now() - recStartAt;
+      const blob = await stopRec();
+      state.recOn = false;
+      recStarting = false;
+      if (elapsed < 500 || !blob || blob.size < 80) {
+        state.scoreBand = state.lastBlob ? state.scoreBand : 0;
+        state.recMsg = "这次太短了，没录上。请点「开始录音」，把整句话说完，再点一次结束。";
+        state.recMsgKind = "err";
+      } else {
+        state.lastBlob = blob;
+        const lesson = state.lesson;
+        const ph = lesson && lesson.phrases[state.phraseIndex];
+        if (ph) state.recordings[ph.id] = blob;
+        state.scoreBand = await scoreBlob(blob);
+        state.recMsg = state.scoreBand
+          ? "已录好！可以点「听我的」，或点「对比听听」先听示范再听自己的。"
+          : "已录好！可以点「听我的」或「对比听听」。";
+        state.recMsgKind = "ok";
+      }
+      render();
+      return;
+    }
+    if (recStarting) return;
+    const token = ++recToken;
+    recStarting = true;
+    const mic = $app.querySelector(".mic");
+    if (mic) mic.textContent = "正在打开麦克风…";
+    const hint = $app.querySelector(".rec-msg");
+    if (hint) {
+      hint.className = "rec-msg";
+      hint.textContent = "如果弹出「允许麦克风」，请点允许。";
+    }
+    try {
+      await startRec();
+      if (token !== recToken) {
+        await stopRec();
+        recStarting = false;
+        return;
+      }
+      state.recOn = true;
+      recStarting = false;
+      state.recMsg = "正在录音。把整句话说完，再点一次橙色按钮结束。";
+      state.recMsgKind = "";
+      render();
+      startRecTimer();
+      startMeter(mediaStream);
+    } catch (err) {
+      if (token !== recToken) {
+        recStarting = false;
+        return;
+      }
+      recStarting = false;
+      state.recOn = false;
+      stopMeter();
+      try { await stopRec(); } catch (e2) { releaseStream(); recorder = null; }
+      state.recMsg = recErrorMessage(err);
+      state.recMsgKind = "err";
+      render();
+    }
   }
 
   async function scoreBlob(blob) {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return 0;
+      const ctx = new Ctx();
+      if (ctx.state === "suspended") {
+        try { await ctx.resume(); } catch (e) {}
+      }
+      const raw = await blob.arrayBuffer();
+      const copy = raw.slice(0);
+      const buf = await new Promise(function (resolve, reject) {
+        let settled = false;
+        const ok = function (b) { if (!settled) { settled = true; resolve(b); } };
+        const bad = function (e) { if (!settled) { settled = true; reject(e || new Error("decode")); } };
+        try {
+          const maybe = ctx.decodeAudioData(copy, ok, bad);
+          if (maybe && typeof maybe.then === "function") maybe.then(ok, bad);
+        } catch (e) { bad(e); }
+      });
       const ch = buf.getChannelData(0);
       let sum = 0, peak = 0, voiced = 0;
       for (let i = 0; i < ch.length; i++) {
@@ -233,6 +634,13 @@
     if (n === 2) return "很接近";
     if (n === 1) return "再试一次";
     return "";
+  }
+
+  function speakCue() {
+    if (state.recOn) return "正在录音。把整句话说完，再点一次橙色按钮结束。";
+    if (state.scoreBand) return bandLabel(state.scoreBand);
+    if (state.lastBlob) return "已录好。可以点「听我的」或「对比听听」。";
+    return "点一下开始录音，把整句话说完，再点一下结束";
   }
 
   function setBanner() {
@@ -324,12 +732,21 @@
           html += '<i class="bar s' + b + (state.scoreBand >= b ? " on" : "") + '"></i>';
         }
         html += "</div>";
-        html += '<p class="cue">' + esc(bandLabel(state.scoreBand) || "按住下面的按钮说话，松开就结束") + "</p>";
-        html += '<button class="mic' + (state.recOn ? " rec" : "") + '" data-act="mic">' +
-          (state.recOn ? "正在录音，松开结束" : "按住说话") + "</button>";
-        html += '<div class="row"><button class="secondary" data-act="play">听示范</button>';
-        html += '<button class="secondary" data-act="mine"' + (state.lastBlob ? "" : " disabled") + ">听我的</button></div>";
-        html += '<button class="primary" data-act="next-phrase">下一句</button>';
+        html += '<p class="cue">' + esc(speakCue()) + "</p>";
+        html += '<div class="level-meter" aria-hidden="true"><span class="meter-fill"></span></div>';
+        if (isInAppBrowser() && !state.lastBlob && !state.recOn && state.recMsgKind !== "err") {
+          html += '<p class="note">如果录音没反应，请点右上角「···」，选择「在 Safari 中打开」或「在浏览器中打开」。</p>';
+        }
+        html += '<button type="button" class="mic' + (state.recOn ? " rec" : "") + '" data-act="mic">' +
+          (state.recOn ? "正在录音，再点一下结束" : "开始录音") + "</button>";
+        if (state.recMsg) {
+          html += '<p class="rec-msg' + (state.recMsgKind === "ok" ? " ok" : (state.recMsgKind === "err" ? " err" : "")) + '">' +
+            esc(state.recMsg) + "</p>";
+        }
+        html += '<div class="row"><button class="secondary" data-act="play"' + (state.recOn ? " disabled" : "") + ">听示范</button>";
+        html += '<button class="secondary" data-act="mine"' + (state.lastBlob && !state.recOn ? "" : " disabled") + ">听我的</button>";
+        html += '<button class="secondary" data-act="compare"' + (state.lastBlob && !state.recOn ? "" : " disabled") + ">对比听听</button></div>";
+        html += '<button class="primary" data-act="next-phrase"' + (state.recOn ? " disabled" : "") + ">下一句</button>";
       }
       html += "</div>";
     } else if (state.view === "task" && lesson) {
@@ -473,43 +890,17 @@
 
   function bind() {
     $app.querySelectorAll("[data-act]").forEach(function (btn) {
+      if (btn.getAttribute("data-act") === "mic") return;
       btn.addEventListener("click", function () { onAct(btn.getAttribute("data-act")); });
     });
     const mic = $app.querySelector(".mic");
     if (mic) {
-      const start = async function (ev) {
+      mic.addEventListener("click", function (ev) {
         ev.preventDefault();
-        if (state.recOn) return;
-        try {
-          await startRec();
-          state.recOn = true;
-          mic.classList.add("rec");
-          mic.textContent = "正在录音，松开结束";
-        } catch (err) {
-          state.banner = isFile() || insecure()
-            ? "这里无法使用麦克风。请通过 http://localhost:8080 或 HTTPS 打开后再试。"
-            : "没有拿到麦克风权限。请在浏览器设置里允许本页使用麦克风。";
-          render();
-        }
-      };
-      const end = async function (ev) {
-        ev.preventDefault();
-        if (!state.recOn) return;
-        const blob = await stopRec();
-        state.recOn = false;
-        if (blob && blob.size > 80) {
-          state.lastBlob = blob;
-          const lesson = state.lesson;
-          const ph = lesson.phrases[state.phraseIndex];
-          state.recordings[ph.id] = blob;
-          state.scoreBand = await scoreBlob(blob);
-        }
-        render();
-      };
-      mic.addEventListener("pointerdown", start);
-      mic.addEventListener("pointerup", end);
-      mic.addEventListener("pointercancel", end);
-      mic.addEventListener("pointerleave", function (ev) { if (state.recOn) end(ev); });
+        ev.stopPropagation();
+        toggleRec();
+      });
+      mic.addEventListener("contextmenu", function (ev) { ev.preventDefault(); });
     }
     $app.querySelectorAll("[data-place]").forEach(function (btn) {
       btn.addEventListener("click", function () { onPlace(btn.getAttribute("data-place")); });
@@ -545,6 +936,7 @@
   }
 
   function openLesson(lesson, practice) {
+    cancelRec();
     state.lesson = lesson;
     state.practice = !!practice;
     state.phraseIndex = 0;
@@ -552,6 +944,8 @@
     state.recordings = {};
     state.lastBlob = null;
     state.scoreBand = 0;
+    state.recMsg = "";
+    state.recMsgKind = "";
     state.taskStep = 0;
     state.taskFeedback = null;
     state.view = "intro";
@@ -573,7 +967,7 @@
 
   async function onAct(act) {
     const lesson = state.lesson;
-    if (act === "home") { state.view = "home"; state.parentAuthed = false; state.tipLesson = null; setBanner(); render(); return; }
+    if (act === "home") { cancelRec(); state.view = "home"; state.parentAuthed = false; state.tipLesson = null; setBanner(); render(); return; }
     if (act === "tips") { state.view = "tips"; state.tipLesson = null; render(); return; }
     if (act === "play-tip-en") {
       const tip = (state.view === "tip-detail" && state.tipLesson ? state.tipLesson.tip : (lesson && lesson.tip));
@@ -597,14 +991,30 @@
     if (act === "play") { await playModel(lesson.phrases[state.phraseIndex]); return; }
     if (act === "slow") { await playModel(lesson.phrases[state.phraseIndex], true); return; }
     if (act === "zh") { state.revealZh = !state.revealZh; render(); return; }
-    if (act === "to-speak") { state.view = "speak"; state.lastBlob = null; state.scoreBand = 0; render(); return; }
+    if (act === "to-speak") {
+      cancelRec();
+      state.view = "speak";
+      state.lastBlob = null;
+      state.scoreBand = 0;
+      state.recMsg = "";
+      state.recMsgKind = "";
+      render();
+      return;
+    }
     if (act === "mine") { if (state.lastBlob) await playBlob(state.lastBlob); return; }
+    if (act === "compare") {
+      if (state.lastBlob) await playCompare(lesson.phrases[state.phraseIndex], state.lastBlob);
+      return;
+    }
     if (act === "next-phrase") {
+      cancelRec();
       if (state.phraseIndex < lesson.phrases.length - 1) {
         state.phraseIndex += 1;
         state.revealZh = false;
         state.lastBlob = null;
         state.scoreBand = 0;
+        state.recMsg = "";
+        state.recMsgKind = "";
         state.view = "listen";
         render();
         playModel(lesson.phrases[state.phraseIndex]);
