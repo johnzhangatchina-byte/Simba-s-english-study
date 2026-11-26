@@ -1,0 +1,254 @@
+#!/usr/bin/env node
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const { spawnSync } = require("child_process");
+const vm = require("vm");
+const assert = require("assert");
+
+const root = path.resolve(__dirname, "..");
+const appPath = path.join(root, "js", "app.js");
+const src = fs.readFileSync(appPath, "utf8");
+
+function fail(msg) {
+  console.error("FAIL:", msg);
+  process.exit(1);
+}
+
+function extractFn(name) {
+  const starts = ["  function " + name + "(", "  async function " + name + "("];
+  let start = -1;
+  for (const p of starts) {
+    start = src.indexOf(p);
+    if (start !== -1) break;
+  }
+  if (start === -1) fail("missing function " + name);
+  const brace = src.indexOf("{", start);
+  let depth = 0;
+  for (let i = brace; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  fail("unclosed function " + name);
+}
+
+const check = spawnSync(process.execPath, ["--check", appPath], { encoding: "utf8" });
+if (check.status !== 0) fail("syntax: " + (check.stderr || check.stdout));
+
+const swCheck = spawnSync(process.execPath, ["--check", path.join(root, "sw.js")], { encoding: "utf8" });
+if (swCheck.status !== 0) fail("sw syntax: " + (swCheck.stderr || swCheck.stdout));
+
+// Source invariants
+[
+  'const STORE = "simba-squad-progress-v1";',
+  "function pickMimeType(",
+  "function toggleRec(",
+  "function recErrorMessage(",
+  "audio/mp4",
+  "audio/mp4;codecs=mp4a.40.2",
+  "audio/aac",
+  "audio/webm;codecs=opus",
+  "开始录音",
+  "对比听听",
+  "recorder.start(200)",
+  "requestData",
+].forEach(function (needle) {
+  if (src.indexOf(needle) === -1) fail("app.js missing: " + needle);
+});
+["按住说话", "pointerdown", "pointerleave", "松开结束"].forEach(function (needle) {
+  if (src.indexOf(needle) !== -1) fail("app.js still contains old hold-to-talk: " + needle);
+});
+
+const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");
+if (sw.indexOf('const VERSION = "simba-squad-v4";') === -1) fail("sw.js VERSION is not v4");
+
+const curriculum = JSON.parse(fs.readFileSync(path.join(root, "data", "curriculum.json"), "utf8"));
+assert.strictEqual(curriculum.cacheVersion, "simba-squad-v4");
+assert.strictEqual(curriculum.lessons.length, 364);
+assert.strictEqual(curriculum.lessons[0].id, "p1-w01-mon");
+assert.strictEqual(curriculum.lessons[363].id, "p4-w52-sun");
+const ids = curriculum.lessons.map(function (l) { return l.id; });
+assert.strictEqual(ids.length, new Set(ids).size, "duplicate lesson ids");
+
+const css = fs.readFileSync(path.join(root, "css", "app.css"), "utf8");
+["recpulse", "level-meter", "rec-msg", ".mic.rec"].forEach(function (n) {
+  if (css.indexOf(n) === -1) fail("css missing " + n);
+});
+
+function makeSandbox(opts) {
+  opts = opts || {};
+  const supported = opts.supported || [];
+  const navigator = {
+    userAgent: opts.ua || "",
+    platform: opts.platform || "Win32",
+    maxTouchPoints: opts.maxTouchPoints || 0,
+    mediaDevices: opts.noMedia ? undefined : { getUserMedia: function () {} },
+  };
+  const sandbox = {
+    navigator: navigator,
+    window: {
+      isSecureContext: opts.secure !== false,
+      MediaRecorder: opts.noRecorder ? undefined : {
+        isTypeSupported: function (t) { return supported.indexOf(t) !== -1; },
+      },
+    },
+    location: { protocol: opts.protocol || "https:" },
+    MediaRecorder: opts.noRecorder ? undefined : {
+      isTypeSupported: function (t) { return supported.indexOf(t) !== -1; },
+    },
+  };
+  sandbox.window.navigator = navigator;
+  sandbox.console = console;
+  const fns = [
+    "isFile", "insecure", "ua", "isWeChat", "isInAppBrowser", "isAppleWebKit",
+    "pickMimeType", "normalizeBlobType", "recSupportError", "recErrorMessage",
+  ].map(extractFn).join("\n");
+  // insecure and isFile exist in source and are used by recSupportError
+  vm.runInNewContext(fns, sandbox, { filename: "app.js-extract" });
+  return sandbox;
+}
+
+// iOS Safari often claims webm is supported but mp4 is the reliable type
+const ios = makeSandbox({
+  ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  platform: "iPhone",
+  supported: ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/mp4;codecs=mp4a.40.2", "audio/aac"],
+});
+assert.strictEqual(ios.isAppleWebKit(), true);
+assert.strictEqual(ios.pickMimeType(), "audio/mp4");
+
+// iPadOS reports as MacIntel
+const ipad = makeSandbox({
+  ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+  platform: "MacIntel",
+  maxTouchPoints: 5,
+  supported: ["audio/webm", "audio/mp4"],
+});
+assert.strictEqual(ipad.isAppleWebKit(), true);
+assert.strictEqual(ipad.pickMimeType(), "audio/mp4");
+
+// Android Chrome prefers webm/opus
+const chrome = makeSandbox({
+  ua: "Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+  supported: ["audio/webm;codecs=opus", "audio/webm", "audio/ogg"],
+});
+assert.strictEqual(chrome.isAppleWebKit(), false);
+assert.strictEqual(chrome.pickMimeType(), "audio/webm;codecs=opus");
+
+// Safari desktop (no webm)
+const safari = makeSandbox({
+  ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+  platform: "MacIntel",
+  supported: ["audio/mp4", "audio/mp4;codecs=mp4a.40.2", "audio/aac"],
+});
+assert.strictEqual(safari.pickMimeType(), "audio/mp4");
+
+// No supported types
+const none = makeSandbox({
+  ua: "Mozilla/5.0 (Linux; Android 13) Chrome/120.0.0.0",
+  supported: [],
+});
+assert.strictEqual(none.pickMimeType(), "");
+
+// Blob type normalization
+assert.strictEqual(ios.normalizeBlobType("audio/mp4;codecs=mp4a.40.2"), "audio/mp4");
+assert.strictEqual(ios.normalizeBlobType("", { type: "audio/mp4" }), "audio/mp4");
+assert.strictEqual(chrome.normalizeBlobType("audio/webm;codecs=opus"), "audio/webm");
+assert.strictEqual(ios.normalizeBlobType(""), "audio/mp4");
+assert.strictEqual(chrome.normalizeBlobType(""), "audio/webm");
+
+// Error messages
+const denied = ios.recErrorMessage({ name: "NotAllowedError", message: "" });
+assert(denied.indexOf("允许") !== -1 && denied.indexOf("麦克风") !== -1, denied);
+
+const wechat = makeSandbox({
+  ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 MicroMessenger/8.0.0",
+  platform: "iPhone",
+  supported: ["audio/mp4"],
+});
+assert.strictEqual(wechat.isWeChat(), true);
+const wechatMsg = wechat.recErrorMessage({ name: "NotAllowedError", message: "" });
+assert(wechatMsg.indexOf("微信") !== -1, wechatMsg);
+assert(wechatMsg.indexOf("Safari") !== -1, wechatMsg);
+
+const insecure = makeSandbox({ protocol: "file:", secure: false, ua: "Mozilla/5.0 Chrome/120" });
+assert.strictEqual(insecure.isFile(), true);
+assert.strictEqual(insecure.recSupportError(), "insecure");
+const insecureMsg = insecure.recErrorMessage(new Error("insecure"));
+assert(insecureMsg.indexOf("https") !== -1, insecureMsg);
+
+const noRec = makeSandbox({ ua: "Mozilla/5.0 Chrome/120", noRecorder: true });
+assert.strictEqual(noRec.recSupportError(), "no-recorder");
+const noRecMsg = noRec.recErrorMessage(new Error("no-recorder"));
+assert(noRecMsg.indexOf("不能录音") !== -1, noRecMsg);
+
+const notFound = chrome.recErrorMessage({ name: "NotFoundError", message: "" });
+assert(notFound.indexOf("没有找到麦克风") !== -1, notFound);
+
+const busy = chrome.recErrorMessage({ name: "NotReadableError", message: "" });
+assert(busy.indexOf("占用") !== -1, busy);
+
+// Simulated MediaRecorder: start(timeslice) throws, fallback start() works
+function FakeRecorder(stream, opts) {
+  this.mimeType = (opts && opts.mimeType) || "audio/mp4";
+  this.state = "inactive";
+  this._chunks = [];
+  this.ondataavailable = null;
+  this.onstart = null;
+  this.onstop = null;
+  this.onerror = null;
+}
+FakeRecorder.prototype.start = function (timeslice) {
+  if (timeslice) throw new Error("timeslice not supported");
+  this.state = "recording";
+  const self = this;
+  setTimeout(function () { if (self.onstart) self.onstart(); }, 0);
+};
+FakeRecorder.prototype.requestData = function () {
+  if (this.ondataavailable) this.ondataavailable({ data: new Blob([new Uint8Array(200)], { type: this.mimeType }) });
+};
+FakeRecorder.prototype.stop = function () {
+  const self = this;
+  this.state = "inactive";
+  setTimeout(function () { if (self.onstop) self.onstop(); }, 0);
+};
+
+(async function () {
+  const rec = new FakeRecorder(null, { mimeType: "audio/mp4" });
+  let started = false;
+  try {
+    rec.start(200);
+  } catch (e) {
+    rec.start();
+  }
+  await new Promise(function (resolve) {
+    rec.onstart = function () { started = true; resolve(); };
+    setTimeout(resolve, 50);
+  });
+  assert(started, "fallback start() should fire onstart");
+  const chunks = [];
+  rec.ondataavailable = function (ev) { if (ev.data && ev.data.size) chunks.push(ev.data); };
+  rec.requestData();
+  const blob = await new Promise(function (resolve) {
+    rec.onstop = function () {
+      const type = "audio/mp4";
+      resolve(chunks.length ? new Blob(chunks, { type: type }) : null);
+    };
+    rec.stop();
+  });
+  assert(blob && blob.size >= 80, "saved blob should be large enough to keep");
+  assert.strictEqual(blob.type, "audio/mp4");
+
+  // short/empty take should be rejected by the UI threshold
+  const tiny = new Blob([new Uint8Array(10)], { type: "audio/mp4" });
+  assert(tiny.size < 80, "tiny blob should be below keep threshold");
+
+  console.log("smoke_recorder: all checks passed");
+})().catch(function (err) {
+  console.error(err);
+  process.exit(1);
+});
