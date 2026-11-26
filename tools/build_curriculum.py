@@ -914,7 +914,7 @@ assert len(lessons) == 52 * 7
 data = {
     "product": "小队电台英语",
     "version": 2,
-    "cacheVersion": "simba-squad-v4",
+    "cacheVersion": "simba-squad-v5",
     "learnerDefaultName": "Simba",
     "noteZh": "课文只用小队、地图、方向和沟通用语，不打开《三角洲行动》游戏。该游戏在中国区 App Store 当前为 18+。",
     "phases": [

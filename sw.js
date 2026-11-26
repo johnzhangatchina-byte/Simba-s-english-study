@@ -1,7 +1,8 @@
-const VERSION = "simba-squad-v4";
+const VERSION = "simba-squad-v5";
 const PRECACHE = [
   "./",
   "./index.html",
+  "./favicon.ico",
   "./css/app.css",
   "./js/app.js",
   "./data/curriculum.json",
