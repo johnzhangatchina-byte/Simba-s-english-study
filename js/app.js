@@ -134,6 +134,10 @@
     return false;
   }
 
+  function isAppleDevice() {
+    return isAppleWebKit() || /iPad|iPhone|iPod/i.test(ua());
+  }
+
   async function playFile(src) {
     return new Promise(function (resolve, reject) {
       const a = new Audio(src);
@@ -179,6 +183,22 @@
     await speak(text, "zh-CN", 0.95);
   }
 
+  function polyfillMediaDevices() {
+    if (typeof navigator === "undefined") return;
+    try {
+      if (!navigator.mediaDevices) navigator.mediaDevices = {};
+      if (typeof navigator.mediaDevices.getUserMedia === "function") return;
+      const legacy = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+      if (!legacy) return;
+      navigator.mediaDevices.getUserMedia = function (constraints) {
+        return new Promise(function (resolve, reject) {
+          legacy.call(navigator, constraints, resolve, reject);
+        });
+      };
+    } catch (e) { /* some WebViews freeze if mediaDevices is sealed */ }
+  }
+  polyfillMediaDevices();
+
   let mediaStream = null;
   let recorder = null;
   let chunks = [];
@@ -189,8 +209,73 @@
   let recTimer = null;
   let recAnalyser = null;
   let recAudioCtx = null;
-  let recMeterStream = null;
   let recMeterRaf = 0;
+  let recHintTimer = 0;
+  let pcmChunks = [];
+  let pcmPeak = 0;
+  let pcmSampleRate = 44100;
+  let pcmActive = false;
+  let pcmSource = null;
+  let pcmNode = null;
+  let pcmMute = null;
+  let meterPeak = 0;
+
+  const MIC_PERMISSION_MS = 20000;
+  const PCM_WORKLET_SRC = [
+    "class PcmCaptureProcessor extends AudioWorkletProcessor {",
+    "  process(inputs) {",
+    "    const ch = inputs[0] && inputs[0][0];",
+    "    if (ch && ch.length) {",
+    "      const copy = new Float32Array(ch.length);",
+    "      copy.set(ch);",
+    "      this.port.postMessage(copy, [copy.buffer]);",
+    "    }",
+    "    return true;",
+    "  }",
+    "}",
+    "registerProcessor('pcm-capture', PcmCaptureProcessor);"
+  ].join("\n");
+
+  function unlockAudio() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    try {
+      if (!recAudioCtx || recAudioCtx.state === "closed") recAudioCtx = new Ctx();
+      if (recAudioCtx.state === "suspended") recAudioCtx.resume().catch(function () {});
+      return recAudioCtx;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function withTimeout(promise, ms, code) {
+    return new Promise(function (resolve, reject) {
+      let settled = false;
+      const timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        const err = new Error(code || "timeout");
+        err.name = "MicTimeoutError";
+        reject(err);
+      }, ms);
+      promise.then(function (value) {
+        if (settled) {
+          if (value && typeof value.getTracks === "function") {
+            try { value.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      }, function (err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
 
   function pickMimeType() {
     if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
@@ -224,14 +309,17 @@
     if (/mp4/i.test(raw) || /aac/i.test(raw) || /mpeg/i.test(raw)) return "audio/mp4";
     if (/webm/i.test(raw)) return "audio/webm";
     if (/ogg/i.test(raw)) return "audio/ogg";
+    if (/wav/i.test(raw)) return "audio/wav";
     if (raw) return raw.split(";")[0];
     return isAppleWebKit() ? "audio/mp4" : "audio/webm";
   }
 
   function recSupportError() {
+    polyfillMediaDevices();
     if (isFile() || !window.isSecureContext) return "insecure";
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return "no-mic-api";
-    if (typeof MediaRecorder === "undefined") return "no-recorder";
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") return "no-mic-api";
+    const canWav = !!(window.AudioContext || window.webkitAudioContext);
+    if (typeof MediaRecorder === "undefined" && !canWav) return "no-recorder";
     return "";
   }
 
@@ -246,6 +334,9 @@
       : "";
     if (msg === "insecure" || name === "SecurityError" || (msg === "no-mic-api" && (isFile() || insecure()))) {
       return "这一页不是安全的打开方式，浏览器不允许使用麦克风。请用手机浏览器打开本课的 https 网址。电脑上请运行文件夹里的启动脚本，再用浏览器打开 http://localhost:8080。不要直接打开网页文件。";
+    }
+    if (name === "MicTimeoutError" || msg === "mic-timeout") {
+      return "等了比较久，还没有开始录音。如果屏幕上出现了「允许麦克风」，请点「允许」。如果没有出现，或以前点过「不允许」，请点地址栏左边的锁图标或「AA」按钮，把本网站的麦克风改成「允许」，然后刷新页面，再点「开始录音」。苹果手机也可以到「设置 → Safari → 麦克风」里打开。 " + inAppHint;
     }
     if (msg === "no-mic-api" || msg === "no-recorder" || name === "NotSupportedError") {
       return "这台浏览器还不能录音。" + (inApp
@@ -270,7 +361,71 @@
     return "录音没能开始。" + (inAppHint || "请再试一次。如果还不行，请用 Safari（苹果）或 Chrome（安卓）打开本课。");
   }
 
+  function encodeWav(chunks, sampleRate) {
+    let total = 0;
+    for (let i = 0; i < chunks.length; i++) total += chunks[i].length;
+    const rate = sampleRate || 44100;
+    const buffer = new ArrayBuffer(44 + total * 2);
+    const view = new DataView(buffer);
+    function writeStr(offset, s) {
+      for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+    }
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + total * 2, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, "data");
+    view.setUint32(40, total * 2, true);
+    let idx = 44;
+    for (let c = 0; c < chunks.length; c++) {
+      const samples = chunks[c];
+      for (let i = 0; i < samples.length; i++, idx += 2) {
+        let s = samples[i];
+        if (s > 1) s = 1;
+        else if (s < -1) s = -1;
+        view.setInt16(idx, s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff), true);
+      }
+    }
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  function chooseCaptureBlob(mediaBlob, wavBlob, info) {
+    info = info || {};
+    const peak = info.peak || 0;
+    const meterPeakValue = info.meterPeak || 0;
+    const elapsed = info.elapsed || 0;
+    const spoke = !!(info.spoke || peak >= 0.045 || meterPeakValue >= 0.15);
+
+    function mediaThin(blob) {
+      return !blob || !blob.size || blob.size < 80;
+    }
+    function wavHasAudio(blob) {
+      return !!(blob && blob.size > 44 + 320);
+    }
+
+    const wavOk = wavHasAudio(wavBlob);
+    if (mediaThin(mediaBlob) && wavOk) return wavBlob;
+    if (!mediaThin(mediaBlob) && mediaBlob.size >= 200) return mediaBlob;
+    if (wavOk) return wavBlob;
+    if (spoke && wavBlob && wavBlob.size > 44) return wavBlob;
+    if (spoke && mediaBlob && mediaBlob.size > 0) return mediaBlob;
+    if (elapsed < 400 && !spoke) return null;
+    if (!mediaThin(mediaBlob)) return mediaBlob;
+    return null;
+  }
+
   async function getMicStream() {
+    polyfillMediaDevices();
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      throw new Error("no-mic-api");
+    }
     const tries = [
       { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } },
       { audio: true }
@@ -278,10 +433,12 @@
     let lastErr = null;
     for (let i = 0; i < tries.length; i++) {
       try {
-        return await navigator.mediaDevices.getUserMedia(tries[i]);
+        return await withTimeout(navigator.mediaDevices.getUserMedia(tries[i]), MIC_PERMISSION_MS, "mic-timeout");
       } catch (e) {
         lastErr = e;
         const name = (e && e.name) || "";
+        const msg = (e && e.message) || "";
+        if (name === "MicTimeoutError" || msg === "mic-timeout") throw e;
         if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") throw e;
       }
     }
@@ -295,23 +452,179 @@
     }
   }
 
-  async function startRec() {
-    const support = recSupportError();
-    if (support) throw new Error(support);
-    releaseStream();
-    mediaStream = await getMicStream();
+  function resetPcm() {
+    pcmChunks = [];
+    pcmPeak = 0;
+    pcmActive = false;
+    meterPeak = 0;
+  }
+
+  function pushPcm(float32) {
+    if (!float32 || !float32.length) return;
+    pcmChunks.push(float32);
+    for (let i = 0; i < float32.length; i++) {
+      const v = Math.abs(float32[i]);
+      if (v > pcmPeak) pcmPeak = v;
+    }
+    if (pcmPeak > meterPeak) meterPeak = pcmPeak;
+    updateMeterFromPeak(pcmPeak);
+  }
+
+  function updateMeterFromPeak(peak) {
+    const el = $app.querySelector(".meter-fill");
+    if (el) el.style.width = Math.min(100, Math.round((peak || 0) * 160)) + "%";
+  }
+
+  function connectSilent(ctx, node) {
+    pcmMute = ctx.createGain();
+    pcmMute.gain.value = 0;
+    node.connect(pcmMute);
+    pcmMute.connect(ctx.destination);
+  }
+
+  async function startWorkletCapture(ctx, source) {
+    const blob = new Blob([PCM_WORKLET_SRC], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    try {
+      await ctx.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const node = new AudioWorkletNode(ctx, "pcm-capture");
+    node.port.onmessage = function (ev) {
+      if (pcmNode !== node || !pcmActive) return;
+      if (ev && ev.data) pushPcm(ev.data);
+    };
+    source.connect(node);
+    connectSilent(ctx, node);
+    pcmNode = node;
+  }
+
+  function startScriptProcessorCapture(ctx, source) {
+    const proc = (ctx.createScriptProcessor || ctx.createJavaScriptNode).call(ctx, 4096, 1, 1);
+    proc.onaudioprocess = function (ev) {
+      if (!pcmActive || pcmNode !== proc) return;
+      const input = ev.inputBuffer.getChannelData(0);
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      pushPcm(copy);
+    };
+    source.connect(proc);
+    connectSilent(ctx, proc);
+    pcmNode = proc;
+  }
+
+  async function startPcmCapture(stream) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx || !stream) return false;
+    try {
+      if (!recAudioCtx || recAudioCtx.state === "closed") recAudioCtx = new Ctx();
+      if (recAudioCtx.state === "suspended") {
+        try { await recAudioCtx.resume(); } catch (e) {}
+      }
+      pcmSampleRate = recAudioCtx.sampleRate || 44100;
+      pcmSource = recAudioCtx.createMediaStreamSource(stream);
+      if (recAudioCtx.audioWorklet && typeof recAudioCtx.audioWorklet.addModule === "function") {
+        try {
+          await startWorkletCapture(recAudioCtx, pcmSource);
+          pcmActive = true;
+          return true;
+        } catch (e) {
+          try { if (pcmSource) pcmSource.disconnect(); } catch (e2) {}
+          try { if (pcmNode) pcmNode.disconnect(); } catch (e2) {}
+          try { if (pcmMute) pcmMute.disconnect(); } catch (e2) {}
+          pcmNode = null;
+          pcmMute = null;
+          pcmSource = recAudioCtx.createMediaStreamSource(stream);
+        }
+      }
+      startScriptProcessorCapture(recAudioCtx, pcmSource);
+      pcmActive = true;
+      return true;
+    } catch (e) {
+      pcmActive = false;
+      return false;
+    }
+  }
+
+  function stopPcmCapture() {
+    pcmActive = false;
+    let wav = null;
+    if (pcmChunks.length) {
+      try { wav = encodeWav(pcmChunks, pcmSampleRate); } catch (e) { wav = null; }
+    }
+    try { if (pcmSource) pcmSource.disconnect(); } catch (e) {}
+    try { if (pcmNode) pcmNode.disconnect(); } catch (e) {}
+    try { if (pcmMute) pcmMute.disconnect(); } catch (e) {}
+    pcmSource = null;
+    pcmNode = null;
+    pcmMute = null;
+    pcmChunks = [];
+    return wav;
+  }
+
+  function startMeterFallback(stream) {
+    if (!stream || pcmActive) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!recAudioCtx || recAudioCtx.state === "closed") recAudioCtx = new Ctx();
+      if (recAudioCtx.state === "suspended") recAudioCtx.resume().catch(function () {});
+      const src = recAudioCtx.createMediaStreamSource(stream);
+      recAnalyser = recAudioCtx.createAnalyser();
+      recAnalyser.fftSize = 256;
+      src.connect(recAnalyser);
+      pcmSource = src;
+      const data = new Uint8Array(recAnalyser.fftSize);
+      const tick = function () {
+        if (!state.recOn || !recAnalyser) return;
+        recAnalyser.getByteTimeDomainData(data);
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = Math.abs(data[i] - 128) / 128;
+          if (v > peak) peak = v;
+        }
+        if (peak > meterPeak) meterPeak = peak;
+        updateMeterFromPeak(peak);
+        recMeterRaf = requestAnimationFrame(tick);
+      };
+      recMeterRaf = requestAnimationFrame(tick);
+    } catch (e) { /* meter is optional */ }
+  }
+
+  function stopMeter() {
+    if (recMeterRaf) {
+      cancelAnimationFrame(recMeterRaf);
+      recMeterRaf = 0;
+    }
+    recAnalyser = null;
+    const el = $app.querySelector(".meter-fill");
+    if (el && !state.recOn) el.style.width = "0%";
+  }
+
+  function clearRecHintTimer() {
+    if (recHintTimer) {
+      clearTimeout(recHintTimer);
+      recHintTimer = 0;
+    }
+  }
+
+  async function startMediaRecorder(stream) {
+    if (typeof MediaRecorder === "undefined") return null;
     chunks = [];
     recMime = pickMimeType();
+    let rec;
     try {
-      recorder = recMime
-        ? new MediaRecorder(mediaStream, { mimeType: recMime })
-        : new MediaRecorder(mediaStream);
+      rec = recMime
+        ? new MediaRecorder(stream, { mimeType: recMime })
+        : new MediaRecorder(stream);
     } catch (e) {
-      recorder = new MediaRecorder(mediaStream);
+      rec = new MediaRecorder(stream);
     }
-    recMime = recorder.mimeType || recMime;
-    recorder.ondataavailable = function (ev) {
-      if (ev.data && ev.data.size) chunks.push(ev.data);
+    recMime = rec.mimeType || recMime;
+    rec._chunks = chunks;
+    rec.ondataavailable = function (ev) {
+      if (ev.data && ev.data.size) rec._chunks.push(ev.data);
     };
     await new Promise(function (resolve, reject) {
       let settled = false;
@@ -325,32 +638,59 @@
         settled = true;
         reject(err || new Error("recorder-start"));
       };
-      recorder.onerror = function (ev) {
+      rec.onerror = function (ev) {
         fail((ev && ev.error) || new Error("recorder-error"));
       };
-      recorder.onstart = ok;
+      rec.onstart = ok;
       try {
-        recorder.start(200);
+        rec.start(200);
       } catch (e) {
-        try { recorder.start(); } catch (e2) { fail(e2); return; }
+        try { rec.start(); } catch (e2) { fail(e2); return; }
       }
       setTimeout(function () {
-        if (recorder && recorder.state === "recording") ok();
+        if (rec && rec.state === "recording") ok();
       }, 250);
       setTimeout(function () {
         if (settled) return;
-        if (recorder && recorder.state === "recording") ok();
+        if (rec && rec.state === "recording") ok();
         else fail(new Error("recorder-start"));
       }, 2000);
     });
+    return rec;
+  }
+
+  async function startRec() {
+    const support = recSupportError();
+    if (support) throw new Error(support);
+    releaseStream();
+    resetPcm();
+    stopMeter();
+    unlockAudio();
+    mediaStream = await getMicStream();
+    const pcmPromise = startPcmCapture(mediaStream);
+    let rec = null;
+    let recErr = null;
+    try {
+      rec = await startMediaRecorder(mediaStream);
+    } catch (e) {
+      recErr = e;
+      rec = null;
+    }
+    recorder = rec;
+    let pcmOk = false;
+    try { pcmOk = await pcmPromise; } catch (e) { pcmOk = false; }
+    if (!recorder && !pcmOk) {
+      releaseStream();
+      throw recErr || new Error("no-recorder");
+    }
+    if (!pcmOk) startMeterFallback(mediaStream);
     recStartAt = Date.now();
   }
 
-  function stopRec() {
+  function stopMediaRecorder() {
     return new Promise(function (resolve) {
       const rec = recorder;
       if (!rec) {
-        releaseStream();
         resolve(null);
         return;
       }
@@ -358,10 +698,10 @@
       const finish = function () {
         if (settled) return;
         settled = true;
-        const type = normalizeBlobType(rec.mimeType || recMime, chunks[0]);
-        const blob = chunks.length ? new Blob(chunks, { type: type }) : null;
-        releaseStream();
-        recorder = null;
+        const recChunks = rec._chunks || chunks;
+        const type = normalizeBlobType(rec.mimeType || recMime, recChunks[0]);
+        const blob = recChunks.length ? new Blob(recChunks, { type: type }) : null;
+        if (recorder === rec) recorder = null;
         resolve(blob && blob.size ? blob : null);
       };
       rec.onstop = finish;
@@ -382,6 +722,29 @@
     });
   }
 
+  function stopRec() {
+    return new Promise(function (resolve) {
+      const elapsed = Math.max(0, Date.now() - recStartAt);
+      stopMeter();
+      stopMediaRecorder().then(function (mediaBlob) {
+        const wavBlob = stopPcmCapture();
+        const peak = Math.max(pcmPeak, meterPeak);
+        releaseStream();
+        if (recAudioCtx) {
+          try { recAudioCtx.close(); } catch (e) {}
+          recAudioCtx = null;
+        }
+        resolve({
+          mediaBlob: mediaBlob && mediaBlob.size ? mediaBlob : null,
+          wavBlob: wavBlob && wavBlob.size ? wavBlob : null,
+          peak: peak,
+          meterPeak: meterPeak,
+          elapsed: elapsed
+        });
+      });
+    });
+  }
+
   function stopRecTimer() {
     if (recTimer) {
       clearInterval(recTimer);
@@ -399,65 +762,20 @@
     }, 250);
   }
 
-  function stopMeter() {
-    if (recMeterRaf) {
-      cancelAnimationFrame(recMeterRaf);
-      recMeterRaf = 0;
-    }
-    recAnalyser = null;
-    if (recMeterStream) {
-      recMeterStream.getTracks().forEach(function (t) { t.stop(); });
-      recMeterStream = null;
-    }
-    if (recAudioCtx) {
-      try { recAudioCtx.close(); } catch (e) {}
-      recAudioCtx = null;
-    }
-  }
-
-  function startMeter(stream) {
-    stopMeter();
-    if (!stream) return;
-    try {
-      recMeterStream = stream.clone();
-    } catch (e) {
-      return;
-    }
-    try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!Ctx) return;
-      recAudioCtx = new Ctx();
-      if (recAudioCtx.state === "suspended") {
-        recAudioCtx.resume().catch(function () {});
-      }
-      const src = recAudioCtx.createMediaStreamSource(recMeterStream);
-      recAnalyser = recAudioCtx.createAnalyser();
-      recAnalyser.fftSize = 256;
-      src.connect(recAnalyser);
-      const data = new Uint8Array(recAnalyser.fftSize);
-      const tick = function () {
-        if (!state.recOn || !recAnalyser) return;
-        recAnalyser.getByteTimeDomainData(data);
-        let peak = 0;
-        for (let i = 0; i < data.length; i++) {
-          const v = Math.abs(data[i] - 128);
-          if (v > peak) peak = v;
-        }
-        const el = $app.querySelector(".meter-fill");
-        if (el) el.style.width = Math.min(100, Math.round((peak / 128) * 160)) + "%";
-        recMeterRaf = requestAnimationFrame(tick);
-      };
-      recMeterRaf = requestAnimationFrame(tick);
-    } catch (e) { /* meter is optional */ }
-  }
-
   function cancelRec() {
     recToken += 1;
     recStarting = false;
     state.recOn = false;
+    clearRecHintTimer();
     stopRecTimer();
     stopMeter();
-    stopRec();
+    stopPcmCapture();
+    stopMediaRecorder();
+    releaseStream();
+    if (recAudioCtx) {
+      try { recAudioCtx.close(); } catch (e) {}
+      recAudioCtx = null;
+    }
   }
 
   function playBlob(blob) {
@@ -525,18 +843,48 @@
     });
   }
 
+  function setOpeningMicUi() {
+    const mic = $app.querySelector(".mic");
+    if (mic) {
+      mic.classList.remove("rec");
+      mic.textContent = "正在打开麦克风…";
+    }
+    const hint = $app.querySelector(".rec-msg");
+    if (hint) {
+      hint.className = "rec-msg";
+      hint.textContent = "如果弹出「允许麦克风」，请点允许。";
+    }
+    clearRecHintTimer();
+    recHintTimer = setTimeout(function () {
+      if (!recStarting || state.recOn) return;
+      const late = $app.querySelector(".rec-msg");
+      if (late) {
+        late.className = "rec-msg";
+        late.textContent = "还在等待你允许麦克风。请在弹出的窗口里点「允许」。如果没有弹出窗口，请点地址栏的锁或「AA」，把麦克风改成允许。";
+      }
+    }, 8000);
+  }
+
   async function toggleRec() {
     if (state.recOn) {
       recStarting = true;
       stopRecTimer();
       stopMeter();
-      const elapsed = Date.now() - recStartAt;
-      const blob = await stopRec();
+      const result = await stopRec();
       state.recOn = false;
       recStarting = false;
-      if (elapsed < 500 || !blob || blob.size < 80) {
+      const spoke = (result.peak || 0) >= 0.045 || (result.meterPeak || 0) >= 0.15;
+      const blob = chooseCaptureBlob(result.mediaBlob, result.wavBlob, {
+        peak: result.peak,
+        meterPeak: result.meterPeak,
+        elapsed: result.elapsed,
+        spoke: spoke
+      });
+      if (!blob) {
         state.scoreBand = state.lastBlob ? state.scoreBand : 0;
-        state.recMsg = "这次太短了，没录上。请点「开始录音」，把整句话说完，再点一次结束。";
+        state.recMsg = state.lastBlob
+          ? "这次没录上，刚才录好的还留着。请再点「开始录音」，靠近麦克风把整句话说完，再点一次结束。"
+          : "这次没录上。请点「开始录音」，靠近麦克风，把整句话说完，再点一次结束。";
         state.recMsgKind = "err";
       } else {
         state.lastBlob = blob;
@@ -555,15 +903,12 @@
     if (recStarting) return;
     const token = ++recToken;
     recStarting = true;
-    const mic = $app.querySelector(".mic");
-    if (mic) mic.textContent = "正在打开麦克风…";
-    const hint = $app.querySelector(".rec-msg");
-    if (hint) {
-      hint.className = "rec-msg";
-      hint.textContent = "如果弹出「允许麦克风」，请点允许。";
-    }
+    polyfillMediaDevices();
+    unlockAudio();
+    setOpeningMicUi();
     try {
       await startRec();
+      clearRecHintTimer();
       if (token !== recToken) {
         await stopRec();
         recStarting = false;
@@ -575,8 +920,8 @@
       state.recMsgKind = "";
       render();
       startRecTimer();
-      startMeter(mediaStream);
     } catch (err) {
+      clearRecHintTimer();
       if (token !== recToken) {
         recStarting = false;
         return;
@@ -588,6 +933,63 @@
       state.recMsg = recErrorMessage(err);
       state.recMsgKind = "err";
       render();
+    }
+  }
+
+  async function beginSpeakCapture() {
+    polyfillMediaDevices();
+    unlockAudio();
+    if (state.recOn || recStarting) return;
+    await toggleRec();
+  }
+
+  function inAppBrowserHint() {
+    if (!isInAppBrowser()) return "";
+    if (isAppleDevice()) {
+      return "检测到你在微信或其他 App 里打开了本课。苹果手机请点右上角「···」，选择「在 Safari 中打开」。iOS 微信内置窗口常常完全不给网页用麦克风，必须用 Safari。安卓微信有时可以录，但用系统浏览器更稳。";
+    }
+    return "检测到你在微信或其他 App 里打开了本课。请点右上角「···」，选择「在浏览器中打开」。在内置窗口里录音经常不稳，用系统浏览器更可靠。";
+  }
+
+  function inAppBannerHtml() {
+    // iOS WeChat (MicroMessenger) webviews often block getUserMedia entirely.
+    // This is a static GitHub Pages site, so we cannot add WeChat JS-SDK (no appId).
+    // Ask families to open the page in Safari. Android WeChat sometimes works; still try recording.
+    if (!isInAppBrowser()) return "";
+    return '<div class="banner inapp-banner"><p>' + esc(inAppBrowserHint()) +
+      '</p><button type="button" class="copy-link" data-act="copy-link">复制链接</button></div>';
+  }
+
+  function copyPageLink() {
+    const url = String(location.href || "");
+    const done = function (ok) {
+      const btn = $app.querySelector("[data-act='copy-link']");
+      if (!btn) return;
+      btn.textContent = ok ? "已复制" : "复制失败，请手动选中地址栏";
+      setTimeout(function () {
+        if (btn && $app.contains(btn)) btn.textContent = "复制链接";
+      }, 1800);
+    };
+    const fallback = function () {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.setAttribute("readonly", "readonly");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        done(!!ok);
+      } catch (e) {
+        done(false);
+      }
+    };
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(url).then(function () { done(true); }, fallback);
+    } else {
+      fallback();
     }
   }
 
@@ -659,6 +1061,7 @@
     const lesson = state.lesson;
     let html = "";
     if (state.banner) html += '<div class="banner">' + esc(state.banner) + "</div>";
+    if (state.view === "home" || state.view === "speak") html += inAppBannerHtml();
 
     if (state.view === "home") {
       const next = nextLesson();
@@ -734,10 +1137,9 @@
         html += "</div>";
         html += '<p class="cue">' + esc(speakCue()) + "</p>";
         html += '<div class="level-meter" aria-hidden="true"><span class="meter-fill"></span></div>';
-        if (isInAppBrowser() && !state.lastBlob && !state.recOn && state.recMsgKind !== "err") {
-          html += '<p class="note">如果录音没反应，请点右上角「···」，选择「在 Safari 中打开」或「在浏览器中打开」。</p>';
-        }
-        html += '<button type="button" class="mic' + (state.recOn ? " rec" : "") + '" data-act="mic">' +
+        if (state.recOn) html += '<p class="rec-live" role="status">正在录音</p>';
+        html += '<button type="button" class="mic' + (state.recOn ? " rec" : "") + '" data-act="mic"' +
+          (state.recOn ? ' aria-pressed="true"' : ' aria-pressed="false"') + ">" +
           (state.recOn ? "正在录音，再点一下结束" : "开始录音") + "</button>";
         if (state.recMsg) {
           html += '<p class="rec-msg' + (state.recMsgKind === "ok" ? " ok" : (state.recMsgKind === "err" ? " err" : "")) + '">' +
@@ -891,13 +1293,17 @@
   function bind() {
     $app.querySelectorAll("[data-act]").forEach(function (btn) {
       if (btn.getAttribute("data-act") === "mic") return;
-      btn.addEventListener("click", function () { onAct(btn.getAttribute("data-act")); });
+      btn.addEventListener("click", function () {
+        unlockAudio();
+        onAct(btn.getAttribute("data-act"));
+      });
     });
     const mic = $app.querySelector(".mic");
     if (mic) {
       mic.addEventListener("click", function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
+        unlockAudio();
         toggleRec();
       });
       mic.addEventListener("contextmenu", function (ev) { ev.preventDefault(); });
@@ -999,6 +1405,11 @@
       state.recMsg = "";
       state.recMsgKind = "";
       render();
+      beginSpeakCapture();
+      return;
+    }
+    if (act === "copy-link") {
+      copyPageLink();
       return;
     }
     if (act === "mine") { if (state.lastBlob) await playBlob(state.lastBlob); return; }
@@ -1113,6 +1524,7 @@
   }
 
   async function boot() {
+    polyfillMediaDevices();
     setBanner();
     try {
       const res = await fetch("data/curriculum.json");
