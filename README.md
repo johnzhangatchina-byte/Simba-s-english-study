@@ -55,7 +55,7 @@
 
 1. 编辑或替换 `data/curriculum.json`（全年课表）。
 2. 如有新的示范音，放到 `audio/`，文件名与课表里的 `audio` 字段一致。
-3. 打开根目录的 `sw.js`，把开头的 `VERSION` 改成一个新值，并与 `data/curriculum.json` 里的 `cacheVersion` 保持一致（当前为 `simba-squad-v2`）。
+3. 打开根目录的 `sw.js`，把开头的 `VERSION` 改成一个新值，并与 `data/curriculum.json` 里的 `cacheVersion` 保持一致（当前为 `simba-squad-v3`）。
 4. 保存后重新用本地服务或重新上传文件夹，在浏览器里打开一次（需要短暂联网或本地刷新），新版本会被缓存下来。之后仍可离线使用。
 
 ## 文件说明
@@ -64,14 +64,15 @@
 - `css/app.css`：样式
 - `js/app.js`：全部课程逻辑（听、录、对比、地图任务、贴纸、游戏小贴士、家长角）
 - `data/curriculum.json`：52 周 × 7 天的课程数据（每天 5 句话 + 一条 tip）
-- `images/`：可复用的课程插图（短语、贴士和地图地点共用同一套图画）
+- `images/`：可复用的课程插图（768px WebP）。画面是原创的小队插画，造型和场景参考《三角洲行动》的视觉语言（头盔、耳机、背包、对讲机，以及大坝、溪谷、航天基地、海边要塞等），不是官方原画，也没有游戏标题或标志。短语、贴士和地图地点共用这一套图画。
 - `audio/`：示范音频（已包含第一周原来的 3 句；新增句子使用系统朗读）
 - `sw.js`：离线缓存；更新内容时请改 `VERSION`（需同时缓存新图片和新课表）
 - `start.sh` / `start-windows.bat`：本地启动
 - `tools/serve.ps1`：Windows 本地小服务
 - `tools/build_curriculum.py`：如需重新生成课表可运行它
 - `tools/course_extras.py`：每天多出的两句话，以及全年游戏小贴士
-- `tools/build_images.py`：如需重新生成插图可运行它
+- `tools/build_images.py`：已停用的 v2 卡通 SVG 生成器，请不要运行它来覆盖 `images/`
+- `tools/style-refs/`：v3 插画的风格样张和文件对照表（不参与网页离线缓存）
 - `README.md`：本说明
 - `manifest.webmanifest`：添加到主屏幕时使用
 

@@ -11,7 +11,7 @@ Write-Host "按 Ctrl+C 结束。"
 $mime = @{
   ".html"="text/html; charset=utf-8"; ".css"="text/css; charset=utf-8"; ".js"="text/javascript; charset=utf-8";
   ".json"="application/json; charset=utf-8"; ".mp3"="audio/mpeg"; ".webmanifest"="application/manifest+json";
-  ".txt"="text/plain; charset=utf-8"; ".md"="text/plain; charset=utf-8"; ".png"="image/png"; ".svg"="image/svg+xml"
+  ".txt"="text/plain; charset=utf-8"; ".md"="text/plain; charset=utf-8"; ".png"="image/png"; ".webp"="image/webp"; ".svg"="image/svg+xml"; ".jpg"="image/jpeg"
 }
 while ($listener.IsListening) {
   $ctx = $listener.GetContext()

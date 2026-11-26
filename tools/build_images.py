@@ -1,3 +1,9 @@
+# V3 NOTE: the live course library is raster WebP in ../images/*.webp
+# (original illustrations in the visual language of 三角洲行动).
+# Do not run this script to overwrite images/; it generates the retired v2
+# flat cartoon SVGs. Style plates and the filename-to-source map live in
+# tools/style-refs/.
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Build a reusable, kid-friendly SVG illustration library for 小队电台英语."""
