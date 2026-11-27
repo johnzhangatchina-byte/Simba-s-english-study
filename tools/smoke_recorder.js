@@ -76,10 +76,10 @@ if (swCheck.status !== 0) fail("sw syntax: " + (swCheck.stderr || swCheck.stdout
 });
 
 const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");
-if (sw.indexOf('const VERSION = "simba-squad-v5";') === -1) fail("sw.js VERSION is not v5");
+if (sw.indexOf('const VERSION = "simba-squad-v6";') === -1) fail("sw.js VERSION is not v6");
 
 const curriculum = JSON.parse(fs.readFileSync(path.join(root, "data", "curriculum.json"), "utf8"));
-assert.strictEqual(curriculum.cacheVersion, "simba-squad-v5");
+assert.strictEqual(curriculum.cacheVersion, "simba-squad-v6");
 assert.strictEqual(curriculum.lessons.length, 364);
 assert.strictEqual(curriculum.lessons[0].id, "p1-w01-mon");
 assert.strictEqual(curriculum.lessons[363].id, "p4-w52-sun");
@@ -94,6 +94,24 @@ const indexHtml = fs.readFileSync(path.join(root, "index.html"), "utf8");
 if (indexHtml.indexOf("mobile-web-app-capable") === -1) fail("index.html missing mobile-web-app-capable");
 if (indexHtml.indexOf("favicon.ico") === -1) fail("index.html missing favicon.ico");
 if (!fs.existsSync(path.join(root, "favicon.ico"))) fail("favicon.ico file missing");
+
+if (indexHtml.indexOf("css/today.css") === -1) fail("index.html missing css/today.css");
+if (indexHtml.indexOf("js/today.js") === -1) fail("index.html missing js/today.js");
+if (!fs.existsSync(path.join(root, "css", "today.css"))) fail("css/today.css missing");
+if (!fs.existsSync(path.join(root, "js", "today.js"))) fail("js/today.js missing");
+const todayJs = fs.readFileSync(path.join(root, "js", "today.js"), "utf8");
+["Hello! My name is Simba.", "I am nine years old.", "How are you?", "I'm fine, thank you.", "What is this?", "I like it.", "Goodbye, Simba!", "beginSpeakCapture", "我听完了，开始说", "听我的", "speakCue"].forEach(function (n) {
+  if (todayJs.indexOf(n) === -1) fail("today.js missing: " + n);
+});
+if (sw.indexOf("./css/today.css") === -1 || sw.indexOf("./js/today.js") === -1) fail("sw.js missing today assets");
+if (sw.indexOf("./images/today/s1-wave.webp") === -1) fail("sw.js missing today images");
+[
+  "intro.webp","s1-idle.webp","s1-wave.webp","s2-idle.webp","s2-proud.webp",
+  "s3-idle.webp","s3-greet.webp","s4-idle.webp","s4-ok.webp","s5-idle.webp",
+  "s5-point.webp","s6-idle.webp","s6-like.webp","s7-idle.webp","s7-bye.webp"
+].forEach(function (name) {
+  if (!fs.existsSync(path.join(root, "images", "today", name))) fail("missing today image " + name);
+});
 
 function makeSandbox(opts) {
   opts = opts || {};
