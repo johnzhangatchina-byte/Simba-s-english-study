@@ -188,7 +188,7 @@
     cancelPlay();
     const api = S();
     if (api && api.cancelRec) api.cancelRec();
-    document.body.classList.remove("today-open");
+    document.body.classList.remove("today-open", "game-open");
     if (api && api.goYearCourse) api.goYearCourse();
   }
 
@@ -198,6 +198,7 @@
     const api = S();
     if (api && api.cancelRec) api.cancelRec();
     cancelPlay();
+    document.body.classList.remove("game-open");
     document.body.classList.add("today-open");
     today.screen = opts.screen || "intro";
     today.index = opts.index || 0;
@@ -572,6 +573,7 @@
   function render() {
     const app = document.getElementById("app");
     if (!app) return;
+    document.body.classList.remove("game-open");
     document.body.classList.add("today-open");
     syncLessonState();
     const api = S();
