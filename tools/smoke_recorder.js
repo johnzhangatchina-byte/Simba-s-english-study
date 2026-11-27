@@ -76,10 +76,10 @@ if (swCheck.status !== 0) fail("sw syntax: " + (swCheck.stderr || swCheck.stdout
 });
 
 const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");
-if (sw.indexOf('const VERSION = "simba-squad-v7";') === -1) fail("sw.js VERSION is not v7");
+if (sw.indexOf('const VERSION = "simba-squad-v8";') === -1) fail("sw.js VERSION is not v8");
 
 const curriculum = JSON.parse(fs.readFileSync(path.join(root, "data", "curriculum.json"), "utf8"));
-assert.strictEqual(curriculum.cacheVersion, "simba-squad-v7");
+assert.strictEqual(curriculum.cacheVersion, "simba-squad-v8");
 assert.strictEqual(curriculum.lessons.length, 364);
 assert.strictEqual(curriculum.lessons[0].id, "p1-w01-mon");
 assert.strictEqual(curriculum.lessons[363].id, "p4-w52-sun");

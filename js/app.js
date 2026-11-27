@@ -1357,6 +1357,10 @@
   }
 
   function openLesson(lesson, practice) {
+    if (window.GameLesson && typeof window.GameLesson.startLesson === "function") {
+      window.GameLesson.startLesson(lesson, { practice: !!practice });
+      return;
+    }
     cancelRec();
     state.lesson = lesson;
     state.practice = !!practice;
@@ -1404,7 +1408,19 @@
       const handled = window.TodayLesson.onAct(act);
       if (handled !== false) return;
     }
-    if (act === "home") { cancelRec(); state.view = "home"; state.parentAuthed = false; state.tipLesson = null; setBanner(); render(); return; }
+    if (act === "home") {
+      cancelRec();
+      state.parentAuthed = false;
+      state.tipLesson = null;
+      setBanner();
+      if (window.GameLesson && typeof window.GameLesson.openHub === "function") {
+        window.GameLesson.openHub();
+        return;
+      }
+      state.view = "home";
+      render();
+      return;
+    }
     if (act === "tips") { state.view = "tips"; state.tipLesson = null; render(); return; }
     if (act === "play-tip-en") {
       const tip = (state.view === "tip-detail" && state.tipLesson ? state.tipLesson.tip : (lesson && lesson.tip));
@@ -1586,6 +1602,7 @@
 
   window.SimbaSquad = {
     getState: function () { return state; },
+    getData: function () { return data; },
     render: render,
     cancelRec: cancelRec,
     beginSpeakCapture: beginSpeakCapture,
@@ -1601,13 +1618,22 @@
     speakCue: speakCue,
     esc: esc,
     loadProgress: loadProgress,
+    saveProgress: saveProgress,
+    nextLesson: nextLesson,
+    completedCount: completedCount,
+    todayISO: todayISO,
+    stickerIcon: function (name) { return STICKER_ICON[name] || "⭐"; },
     goYearCourse: function () {
       cancelRec();
-      document.body.classList.remove("today-open", "game-open");
-      state.view = "home";
       state.parentAuthed = false;
       state.tipLesson = null;
       setBanner();
+      if (window.GameLesson && typeof window.GameLesson.openHub === "function") {
+        window.GameLesson.openHub();
+        return;
+      }
+      document.body.classList.remove("today-open", "game-open");
+      state.view = "home";
       if (!data) {
         $app.innerHTML = '<div class="banner">全年课程数据还没有打开。请刷新一次，或确认 data/curriculum.json 和网页在一起。</div>' +
           '<div class="card"><button class="primary" data-act="game-lesson">返回小队集合</button>' +

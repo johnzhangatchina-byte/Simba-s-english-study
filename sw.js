@@ -1,4 +1,4 @@
-const VERSION = "simba-squad-v7";
+const VERSION = "simba-squad-v8";
 const PRECACHE = [
   "./",
   "./index.html",
@@ -11,6 +11,9 @@ const PRECACHE = [
   "./js/game.js",
   "./data/curriculum.json",
   "./images/game/camp-map.webp",
+  "./images/game/comms-map.webp",
+  "./images/game/lookout-map.webp",
+  "./images/game/briefing-map.webp",
   "./images/game/simba-idle.webp",
   "./images/game/simba-talk.webp",
   "./images/game/simba-wave.webp",
