@@ -1056,13 +1056,19 @@
   }
 
   function render() {
+    if (state.view === "game" && window.GameLesson && typeof window.GameLesson.render === "function") {
+      window.GameLesson.render();
+      bind();
+      if (typeof window.GameLesson.afterRender === "function") window.GameLesson.afterRender();
+      return;
+    }
     if (state.view === "today" && window.TodayLesson && typeof window.TodayLesson.render === "function") {
       window.TodayLesson.render();
       bind();
       if (typeof window.TodayLesson.afterRender === "function") window.TodayLesson.afterRender();
       return;
     }
-    document.body.classList.remove("today-open");
+    document.body.classList.remove("today-open", "game-open");
     if (!data) return;
     const p = loadProgress();
     const lesson = state.lesson;
@@ -1087,7 +1093,8 @@
         html += '<p class="meta">先听五句话，再说，再做一个小任务。完成后可解锁今日游戏小贴士。不打开游戏。</p>';
         html += '<button class="primary" data-act="start">开始今天的任务</button>';
       }
-      html += '<button class="secondary" data-act="today-lesson">打开今日动画课</button>';
+      html += '<button class="secondary" data-act="game-lesson">打开小队集合</button>';
+      html += '<button class="secondary" data-act="today-lesson">打开上一课：今日动画课</button>';
       html += '<div class="progress-bar"><span style="width:' + pct + '%"></span></div>';
       html += '<p class="meta">已完成 ' + done + " / " + total + " 课</p></div>";
       const stickers = Object.values(p.completed).map(function (c) { return c.sticker; }).filter(Boolean);
@@ -1385,6 +1392,14 @@
       if (window.TodayLesson && typeof window.TodayLesson.start === "function") window.TodayLesson.start();
       return;
     }
+    if (act === "game-lesson") {
+      if (window.GameLesson && typeof window.GameLesson.start === "function") window.GameLesson.start();
+      return;
+    }
+    if (state.view === "game" && window.GameLesson && typeof window.GameLesson.onAct === "function") {
+      const handled = window.GameLesson.onAct(act);
+      if (handled !== false) return;
+    }
     if (state.view === "today" && window.TodayLesson && typeof window.TodayLesson.onAct === "function") {
       const handled = window.TodayLesson.onAct(act);
       if (handled !== false) return;
@@ -1546,6 +1561,10 @@
       const res = await fetch("data/curriculum.json");
       data = await res.json();
     } catch (e) {
+      if (window.GameLesson && typeof window.GameLesson.start === "function") {
+        window.GameLesson.start();
+        return;
+      }
       if (window.TodayLesson && typeof window.TodayLesson.start === "function") {
         window.TodayLesson.start();
         return;
@@ -1556,7 +1575,9 @@
     if ("serviceWorker" in navigator && window.isSecureContext) {
       navigator.serviceWorker.register("sw.js").catch(function () {});
     }
-    if (window.TodayLesson && typeof window.TodayLesson.start === "function") {
+    if (window.GameLesson && typeof window.GameLesson.start === "function") {
+      window.GameLesson.start();
+    } else if (window.TodayLesson && typeof window.TodayLesson.start === "function") {
       window.TodayLesson.start();
     } else {
       render();
@@ -1582,14 +1603,15 @@
     loadProgress: loadProgress,
     goYearCourse: function () {
       cancelRec();
-      document.body.classList.remove("today-open");
+      document.body.classList.remove("today-open", "game-open");
       state.view = "home";
       state.parentAuthed = false;
       state.tipLesson = null;
       setBanner();
       if (!data) {
         $app.innerHTML = '<div class="banner">全年课程数据还没有打开。请刷新一次，或确认 data/curriculum.json 和网页在一起。</div>' +
-          '<div class="card"><button class="primary" data-act="today-lesson">返回今日动画课</button></div>';
+          '<div class="card"><button class="primary" data-act="game-lesson">返回小队集合</button>' +
+          '<button class="secondary" data-act="today-lesson">打开上一课</button></div>';
         bind();
         return;
       }

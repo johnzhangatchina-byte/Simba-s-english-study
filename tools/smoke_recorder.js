@@ -76,10 +76,10 @@ if (swCheck.status !== 0) fail("sw syntax: " + (swCheck.stderr || swCheck.stdout
 });
 
 const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");
-if (sw.indexOf('const VERSION = "simba-squad-v6";') === -1) fail("sw.js VERSION is not v6");
+if (sw.indexOf('const VERSION = "simba-squad-v7";') === -1) fail("sw.js VERSION is not v7");
 
 const curriculum = JSON.parse(fs.readFileSync(path.join(root, "data", "curriculum.json"), "utf8"));
-assert.strictEqual(curriculum.cacheVersion, "simba-squad-v6");
+assert.strictEqual(curriculum.cacheVersion, "simba-squad-v7");
 assert.strictEqual(curriculum.lessons.length, 364);
 assert.strictEqual(curriculum.lessons[0].id, "p1-w01-mon");
 assert.strictEqual(curriculum.lessons[363].id, "p4-w52-sun");
@@ -111,6 +111,26 @@ if (sw.indexOf("./images/today/s1-wave.webp") === -1) fail("sw.js missing today 
   "s5-point.webp","s6-idle.webp","s6-like.webp","s7-idle.webp","s7-bye.webp"
 ].forEach(function (name) {
   if (!fs.existsSync(path.join(root, "images", "today", name))) fail("missing today image " + name);
+});
+
+if (indexHtml.indexOf("css/game.css") === -1) fail("index.html missing css/game.css");
+if (indexHtml.indexOf("js/game.js") === -1) fail("index.html missing js/game.js");
+if (!fs.existsSync(path.join(root, "css", "game.css"))) fail("css/game.css missing");
+if (!fs.existsSync(path.join(root, "js", "game.js"))) fail("js/game.js missing");
+const gameJs = fs.readFileSync(path.join(root, "js", "game.js"), "utf8");
+["My name is Simba.", "I'm ready.", "We are a team.", "This is my friend.", "How are you?", "beginSpeakCapture", "我听完了，开始说", "听我的", "对比听听", "audio/p1-w01-tue-0-my-name-is-simba.mp3"].forEach(function (n) {
+  if (gameJs.indexOf(n) === -1) fail("game.js missing: " + n);
+});
+if (gameJs.indexOf("威龙") !== -1) fail("game.js must not use official operator names");
+if (sw.indexOf("./css/game.css") === -1 || sw.indexOf("./js/game.js") === -1) fail("sw.js missing game assets");
+if (sw.indexOf("./images/game/camp-map.webp") === -1) fail("sw.js missing game images");
+[
+  "camp-map.webp","simba-idle.webp","simba-talk.webp","simba-wave.webp","simba-point.webp",
+  "simba-pointout.webp","simba-ready.webp","simba-thumbs.webp",
+  "simba-walk-1.webp","simba-walk-2.webp","simba-walk-3.webp","simba-walk-4.webp",
+  "nilo-idle.webp","nilo-talk.webp","reed-idle.webp","reed-thumbs.webp"
+].forEach(function (name) {
+  if (!fs.existsSync(path.join(root, "images", "game", name))) fail("missing game image " + name);
 });
 
 function makeSandbox(opts) {
