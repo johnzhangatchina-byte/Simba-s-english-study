@@ -1,7 +1,7 @@
 {
   "product": "小队电台英语",
   "version": 3,
-  "cacheVersion": "simba-squad-v5",
+  "cacheVersion": "simba-squad-v6",
   "learnerDefaultName": "Simba",
   "noteZh": "课文只用小队、地图、方向和沟通用语，不打开《三角洲行动》游戏。该游戏在中国区 App Store 当前为 18+。",
   "phases": [
